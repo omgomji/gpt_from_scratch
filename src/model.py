@@ -54,6 +54,7 @@ import torch.nn.functional as F
 
 from src.block import Block
 from src.config import Config
+from src.kv_cache import KVCache
 
 
 class GPTModel(nn.Module):
@@ -127,7 +128,9 @@ class GPTModel(nn.Module):
         self,
         idx: torch.Tensor,
         targets: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        kv_caches: list[list[KVCache]] | None = None,
+        use_cache: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None] | tuple[torch.Tensor, torch.Tensor | None, list[list[KVCache]]]:
         """Compute logits and, optionally, cross-entropy loss.
 
         Parameters
@@ -136,23 +139,49 @@ class GPTModel(nn.Module):
             Integer token IDs. T must be ≤ block_size.
         targets : torch.Tensor  shape (B, T) | None
             Next-token targets. If None, only logits are returned.
+        kv_caches : list[list[KVCache]] | None
+            Optional pre-existing key-value caches for fast autoregressive generation.
+        use_cache : bool
+            If True, initialize (if None) and update kv_caches, returning them.
 
         Returns
         -------
         logits : torch.Tensor  shape (B, T, vocab_size)
         loss   : torch.Tensor scalar | None
+        kv_caches : (only if use_cache=True) updated caches.
         """
         B, T = idx.shape
         device = idx.device
 
+        if use_cache and kv_caches is None:
+            kv_caches = []
+            head_size = self.config.n_embd // self.config.n_head
+            for _ in range(self.config.n_layer):
+                layer_cache = []
+                for _ in range(self.config.n_head):
+                    layer_cache.append(KVCache(
+                        key=torch.empty((B, 0, head_size), device=device),
+                        value=torch.empty((B, 0, head_size), device=device),
+                    ))
+                kv_caches.append(layer_cache)
+
+        # Determine starting position based on cache length
+        start_pos = 0
+        if kv_caches is not None:
+            start_pos = kv_caches[0][0].key.shape[1]
+
         # Token + positional embeddings (SDD §9, GPTModel forward)
         tok_emb = self.token_embedding_table(idx)                              # (B, T, C)
-        pos_ids = torch.arange(T, device=device)                               # (T,)
+        pos_ids = torch.arange(start_pos, start_pos + T, device=device)        # (T,)
         pos_emb = self.position_embedding_table(pos_ids)                       # (T, C)
         x = tok_emb + pos_emb                                                  # (B, T, C)
 
         # N Transformer blocks
-        x = self.blocks(x)   # (B, T, C)
+        for i, block in enumerate(self.blocks):
+            if kv_caches is not None:
+                x = block(x, kv_caches[i])
+            else:
+                x = block(x)
 
         # Final layer norm + project to vocabulary
         x = self.ln_f(x)                    # (B, T, C)
@@ -164,6 +193,8 @@ class GPTModel(nn.Module):
             B, T, C = logits.shape
             loss = F.cross_entropy(logits.view(B * T, C), targets.view(B * T))
 
+        if use_cache:
+            return logits, loss, kv_caches
         return logits, loss
 
     # ------------------------------------------------------------------

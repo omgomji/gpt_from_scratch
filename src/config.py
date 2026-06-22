@@ -57,6 +57,8 @@ class Config:
     preset: str = "small"
 
     # Model architecture
+    tokenizer_type: str = "char"
+    bpe_vocab_size: int = 512
     block_size: int = 64
     n_embd: int = 128
     n_head: int = 4
@@ -69,6 +71,14 @@ class Config:
     eval_interval: int = 500
     eval_iters: int = 200
     learning_rate: float = 3e-4
+    
+    # Training improvements
+    use_amp: bool = False
+    grad_accum_steps: int = 1
+    use_compile: bool = False
+    warmup_iters: int = 100
+    min_lr: float = 3e-5
+    weight_decay: float = 0.1
 
     # System
     seed: int = 1337
@@ -163,9 +173,29 @@ _PRESETS: dict[str, dict] = {
         eval_iters=200,
         learning_rate=3e-4,
     ),
+
+    # ── Stage 6: V2 upgrades ─────────────────────────────────────────────
+    "large": dict(
+        preset="large",
+        block_size=256,
+        n_embd=512,
+        n_head=8,
+        n_layer=8,
+        dropout=0.2,
+        batch_size=64,
+        max_iters=10_000,
+        eval_interval=1000,
+        eval_iters=200,
+        learning_rate=3e-4,
+        tokenizer_type="bpe",
+        bpe_vocab_size=1024,
+        use_amp=True,
+        use_compile=True,
+        grad_accum_steps=4,
+    ),
 }
 
-PresetName = Literal["bigram", "tiny", "small", "medium"]
+PresetName = Literal["bigram", "tiny", "small", "medium", "large"]
 
 
 def get_config(preset: PresetName = "small", **overrides) -> Config:

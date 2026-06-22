@@ -45,6 +45,7 @@ import torch.nn as nn
 
 from src.attention import MultiHeadAttention
 from src.feedforward import FeedForward
+from src.kv_cache import KVCache
 
 
 class Block(nn.Module):
@@ -85,7 +86,7 @@ class Block(nn.Module):
         self.ln2  = nn.LayerNorm(n_embd)
         self.ffwd = FeedForward(n_embd, dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, kv_caches: list[KVCache] | None = None) -> torch.Tensor:
         """Apply pre-norm attention and FFN with residual connections.
 
         Implements the pre-norm residual pattern from SDD §5.1 (Module 8)::
@@ -104,7 +105,7 @@ class Block(nn.Module):
             Updated token representations.
         """
         # Attention sub-layer: pre-norm → attend → residual add
-        x = x + self.attn(self.ln1(x))
+        x = x + self.attn(self.ln1(x), kv_caches)
         # FFN sub-layer: pre-norm → feed-forward → residual add
         x = x + self.ffwd(self.ln2(x))
         return x

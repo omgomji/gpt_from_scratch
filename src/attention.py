@@ -48,6 +48,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.kv_cache import KVCache
+
 
 # ---------------------------------------------------------------------------
 # Module 5 — CausalSelfAttention
@@ -101,8 +103,11 @@ class CausalSelfAttention(nn.Module):
         )
 
         self.attn_dropout = nn.Dropout(dropout)
+        
+        # For attention visualization
+        self._last_attn_weights: torch.Tensor | None = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, kv_cache: KVCache | None = None) -> torch.Tensor:
         """Compute scaled dot-product causal self-attention.
 
         Parameters
@@ -122,20 +127,31 @@ class CausalSelfAttention(nn.Module):
         k = self.key(x)     # (B, T, hs)
         v = self.value(x)   # (B, T, hs)
 
+        if kv_cache is not None:
+            k, v = kv_cache.update(k, v)
+
+        T_seq = k.shape[1]
+
         # Attention scores — scaled by 1/√head_size to keep variance stable
-        # (B, T, hs) @ (B, hs, T) → (B, T, T)
+        # (B, T, hs) @ (B, hs, T_seq) → (B, T, T_seq)
         scale = self.head_size ** -0.5
-        wei = (q @ k.transpose(-2, -1)) * scale   # (B, T, T)
+        wei = (q @ k.transpose(-2, -1)) * scale   # (B, T, T_seq)
 
         # Apply causal mask: positions j > i get score → -∞ (future blocked)
-        wei = wei.masked_fill(~self.tril[:T, :T], float("-inf"))
+        # Slicing correctly handles both cached (T=1) and uncached (T>1) cases
+        cache_len = T_seq - T
+        wei = wei.masked_fill(~self.tril[cache_len:cache_len+T, :T_seq], float("-inf"))
 
-        # Softmax → attention weights (B, T, T); dropout for regularisation
+        # Softmax → attention weights (B, T, T_seq); dropout for regularisation
         wei = F.softmax(wei, dim=-1)
+        
+        if not self.training:
+            self._last_attn_weights = wei.detach()
+
         wei = self.attn_dropout(wei)
 
         # Aggregate values
-        out = wei @ v   # (B, T, T) @ (B, T, hs) → (B, T, hs)
+        out = wei @ v   # (B, T, T_seq) @ (B, T_seq, hs) → (B, T, hs)
         return out
 
 
@@ -193,7 +209,7 @@ class MultiHeadAttention(nn.Module):
         self.proj    = nn.Linear(n_embd, n_embd)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, kv_caches: list[KVCache] | None = None) -> torch.Tensor:
         """Run all heads in parallel and combine their outputs.
 
         Parameters
@@ -206,7 +222,10 @@ class MultiHeadAttention(nn.Module):
             Projected concatenation of all head outputs.
         """
         # Each head: (B, T, head_size) → concat along last dim → (B, T, C)
-        out = torch.cat([head(x) for head in self.heads], dim=-1)
+        if kv_caches is None:
+            out = torch.cat([head(x) for head in self.heads], dim=-1)
+        else:
+            out = torch.cat([head(x, kv_caches[i]) for i, head in enumerate(self.heads)], dim=-1)
         # Project back to embedding dim and apply dropout
         out = self.dropout(self.proj(out))
         return out

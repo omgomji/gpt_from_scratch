@@ -34,7 +34,7 @@ from typing import Literal, Tuple
 
 import torch
 
-from src.tokenizer import CharTokenizer
+from src.tokenizer import BaseTokenizer
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +50,14 @@ class DatasetBuilder:
         Integer token IDs for the first 90 % of the corpus (FR-5).
     val_data   : torch.Tensor  shape (N_val,)
         Integer token IDs for the remaining 10 % of the corpus (FR-5).
-    tokenizer  : CharTokenizer
+    tokenizer  : BaseTokenizer
         The tokenizer used for encoding — stored for external access.
 
     Parameters
     ----------
     text      : str
         Raw UTF-8 corpus text.
-    tokenizer : CharTokenizer
+    tokenizer : BaseTokenizer
         A tokenizer that has already had :meth:`build_vocab` called.
     split_ratio : float
         Fraction of corpus used for training (default 0.9 → 90/10 split).
@@ -68,7 +68,7 @@ class DatasetBuilder:
     def __init__(
         self,
         text: str,
-        tokenizer: CharTokenizer,
+        tokenizer: BaseTokenizer,
         split_ratio: float = TRAIN_SPLIT,
     ) -> None:
         self.tokenizer = tokenizer

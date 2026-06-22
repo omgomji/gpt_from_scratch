@@ -91,6 +91,7 @@ class Generator:
         prompt: str = "",
         max_new_tokens: int = 500,
         temperature: float = 1.0,
+        use_cache: bool = True,
     ) -> str:
         """Generate text autoregressively starting from *prompt*.
 
@@ -105,6 +106,8 @@ class Generator:
         temperature    : float
             Sampling temperature. 1.0 = neutral, < 1.0 = focused,
             > 1.0 = creative. 0.0 = greedy argmax.
+        use_cache      : bool
+            If True, use KV caching for fast generation (default True).
 
         Returns
         -------
@@ -119,7 +122,7 @@ class Generator:
 
         idx = torch.tensor([seed_ids], dtype=torch.long, device=self.device)
 
-        idx = self._generate_ids(idx, max_new_tokens, temperature)
+        idx = self._generate_ids(idx, max_new_tokens, temperature, use_cache)
         return self.tokenizer.decode(idx[0].tolist())
 
     # ------------------------------------------------------------------
@@ -132,6 +135,7 @@ class Generator:
         idx: torch.Tensor,
         max_new_tokens: int,
         temperature: float,
+        use_cache: bool = True,
     ) -> torch.Tensor:
         """Inner generation loop operating on token-ID tensors.
 
@@ -146,13 +150,27 @@ class Generator:
         torch.Tensor  shape (B, T + max_new_tokens)
         """
         self.model.eval()
+        
+        is_gpt = type(self.model).__name__ == "GPTModel"
+        kv_caches = None
 
         for _ in range(max_new_tokens):
-            # ── Crop context to block_size (FR-18 / T-10) ─────────────
-            idx_cond = idx[:, -self.block_size:]
-
-            # ── Forward pass (eval mode, no grad) ─────────────────────
-            logits, _ = self.model(idx_cond)
+            if use_cache and is_gpt:
+                cache_len = kv_caches[0][0].key.shape[1] if kv_caches is not None else 0
+                if cache_len >= self.block_size:
+                    kv_caches = None  # Flush cache if we hit context limit
+                
+                if kv_caches is None:
+                    idx_cond = idx[:, -self.block_size:]
+                    logits, _, kv_caches = self.model(idx_cond, use_cache=True)
+                else:
+                    next_id = idx[:, -1:]
+                    logits, _, kv_caches = self.model(next_id, kv_caches=kv_caches, use_cache=True)
+            else:
+                # ── Crop context to block_size (FR-18 / T-10) ─────────────
+                idx_cond = idx[:, -self.block_size:]
+                # ── Forward pass (eval mode, no grad) ─────────────────────
+                logits, _ = self.model(idx_cond)
 
             # ── Focus on last time-step's predictions ─────────────────
             logits = logits[:, -1, :]   # (B, vocab_size)

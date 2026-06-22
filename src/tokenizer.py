@@ -23,7 +23,19 @@ Usage
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Protocol
+
+
+class BaseTokenizer(Protocol):
+    """Protocol defining the interface for all tokenizers (Char, BPE)."""
+    
+    @property
+    def vocab_size(self) -> int: ...
+
+    def encode(self, text: str) -> List[int]: ...
+
+    def decode(self, ids: List[int]) -> str: ...
+
 
 
 class CharTokenizer:

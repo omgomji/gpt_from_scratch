@@ -39,7 +39,8 @@ from src.config import get_config, list_presets
 from src.dataset import DatasetBuilder
 from src.bigram import BigramLanguageModel
 from src.model import GPTModel
-from src.tokenizer import CharTokenizer
+from src.bpe_tokenizer import BPETokenizer
+from src.tokenizer import CharTokenizer, BaseTokenizer
 from src.trainer import Trainer
 from src.generator import Generator
 
@@ -88,6 +89,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size",     type=int, default=None,    help="Override batch size.")
     parser.add_argument("--seed",           type=int, default=None,    help="Override random seed.")
     parser.add_argument("--device",         default=None,              help='Override device, e.g. "cpu", "cuda".')
+    parser.add_argument("--tokenizer",      choices=["char", "bpe"],   help="Override tokenizer type.")
+    parser.add_argument("--use-amp",        action="store_true",       help="Enable Automatic Mixed Precision.")
+    parser.add_argument("--use-compile",    action="store_true",       help="Enable torch.compile.")
+    parser.add_argument("--grad-accum",     type=int, default=None,    help="Gradient accumulation steps.")
     parser.add_argument("--gen-tokens",     type=int, default=300,     help="Tokens to generate after training.")
     parser.add_argument("--gen-prompt",     default="",               help="Seed text for post-training generation.")
     return parser.parse_args()
@@ -107,6 +112,12 @@ def main() -> None:
     if args.seed        is not None: overrides["seed"]           = args.seed
     if args.device      is not None: overrides["device"]         = args.device
     if args.data_path   != "data/input.txt": overrides["data_path"] = args.data_path
+    
+    if args.tokenizer: overrides["tokenizer_type"] = args.tokenizer
+    if args.use_amp: overrides["use_amp"] = True
+    if args.use_compile: overrides["use_compile"] = True
+    if args.grad_accum: overrides["grad_accum_steps"] = args.grad_accum
+    
     overrides["checkpoint_dir"] = args.checkpoint_dir
 
     cfg = get_config(args.config, **overrides)
@@ -124,9 +135,24 @@ def main() -> None:
     text = _load_corpus(cfg.data_path)
     print(f"      {len(text):,} characters read from '{cfg.data_path}'")
 
-    tokenizer = CharTokenizer()
-    tokenizer.build_vocab(text)
-    print(f"      Vocabulary: {tokenizer.vocab_size} unique characters")
+    tokenizer: BaseTokenizer
+    if cfg.tokenizer_type == "bpe":
+        tokenizer = BPETokenizer()
+        bpe_path = os.path.join(cfg.checkpoint_dir, "bpe.json")
+        if args.resume and os.path.exists(bpe_path):
+            print(f"      Loading pretrained BPE from '{bpe_path}'...")
+            tokenizer.load(bpe_path)
+        else:
+            print(f"      Training BPE tokenizer (target vocab: {cfg.bpe_vocab_size})...")
+            tokenizer.train(text, vocab_size=cfg.bpe_vocab_size, verbose=False)
+            os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+            tokenizer.save(bpe_path)
+            print(f"      Saved BPE merges to '{bpe_path}'")
+    else:
+        tokenizer = CharTokenizer()
+        tokenizer.build_vocab(text)
+        
+    print(f"      Vocabulary: {tokenizer.vocab_size} unique tokens ({cfg.tokenizer_type})")
 
     dataset = DatasetBuilder(text, tokenizer)
     print(f"      Train tokens : {len(dataset.train_data):,}")

@@ -66,6 +66,7 @@ import torch.nn as nn
 
 from src.config import Config
 from src.dataset import DatasetBuilder, get_batch
+from src.lr_scheduler import get_lr
 
 
 class Trainer:
@@ -106,15 +107,28 @@ class Trainer:
         self.device  = config.resolved_device()
         self.step    = 0
 
-        self.optimizer = torch.optim.AdamW(
-            model.parameters(), lr=config.learning_rate
-        )
+        # Setup model compilation
+        if config.use_compile and hasattr(torch, "compile"):
+            self.model = torch.compile(self.model)
+
+        # Move model to target device immediately
+        self.model.to(self.device)
+
+        # Weight decay group separation (GPT-2 convention)
+        decay_params    = [p for p in self.model.parameters() if p.dim() >= 2]
+        no_decay_params = [p for p in self.model.parameters() if p.dim() < 2]
+        self.optimizer = torch.optim.AdamW([
+            {"params": decay_params,    "weight_decay": config.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ], lr=config.learning_rate)
+
+        # Setup AMP Scaler
+        use_scaler = config.use_amp and self.device.type == "cuda"
+        self.scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+
         self._on_log = on_log or self._default_log
 
-        # Move model to target device immediately (not deferred to train())
-        # so that methods like _estimate_loss() work correctly even when
-        # called directly without going through train() first.
-        model.to(self.device)
+
 
         # Training history (step → {train_loss, val_loss})
         self.history: list[dict] = []
@@ -149,14 +163,27 @@ class Trainer:
         for step in range(1, cfg.max_iters + 1):
             self.step = step
 
-            # ── Training step ─────────────────────────────────────────
-            model.train()
-            xb, yb = get_batch("train", self.dataset, cfg.batch_size, cfg.block_size, self.device)
-            _, loss = model(xb, yb)
+            # ── LR Scheduler ──────────────────────────────────────────
+            lr = get_lr(step, cfg.max_iters, cfg.learning_rate, cfg.min_lr, cfg.warmup_iters)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
 
+            # ── Training step (with Gradient Accumulation & AMP) ──────
+            model.train()
             self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            self.optimizer.step()
+            
+            for _ in range(cfg.grad_accum_steps):
+                xb, yb = get_batch("train", self.dataset, cfg.batch_size, cfg.block_size, self.device)
+                
+                device_type = "cuda" if self.device.type == "cuda" else "cpu"
+                with torch.autocast(device_type=device_type, enabled=cfg.use_amp):
+                    _, loss = model(xb, yb)
+                    loss = loss / cfg.grad_accum_steps
+                    
+                self.scaler.scale(loss).backward()
+                
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             # ── Periodic evaluation (FR-15) ───────────────────────────
             if step % cfg.eval_interval == 0:
@@ -202,7 +229,9 @@ class Trainer:
             losses = torch.zeros(cfg.eval_iters)
             for k in range(cfg.eval_iters):
                 xb, yb = get_batch(split, self.dataset, cfg.batch_size, cfg.block_size, self.device)
-                _, loss = model(xb, yb)
+                device_type = "cuda" if self.device.type == "cuda" else "cpu"
+                with torch.autocast(device_type=device_type, enabled=cfg.use_amp):
+                    _, loss = model(xb, yb)
                 losses[k] = loss.item()
             results[split] = losses.mean().item()
 

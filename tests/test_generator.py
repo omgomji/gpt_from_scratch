@@ -61,9 +61,9 @@ class TestGenerator:
         seen_lengths: list[int] = []
         original_forward = model.forward
 
-        def instrumented_forward(idx, targets=None):
+        def instrumented_forward(idx, targets=None, **kwargs):
             seen_lengths.append(idx.shape[1])   # T dimension
-            return original_forward(idx, targets)
+            return original_forward(idx, targets, **kwargs)
 
         model.forward = instrumented_forward   # type: ignore[method-assign]
 

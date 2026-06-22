@@ -29,7 +29,8 @@ import torch
 from src.config import get_config
 from src.model import GPTModel
 from src.bigram import BigramLanguageModel
-from src.tokenizer import CharTokenizer
+from src.bpe_tokenizer import BPETokenizer
+from src.tokenizer import CharTokenizer, BaseTokenizer
 from src.generator import Generator
 
 
@@ -49,6 +50,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=500,       help="Number of new tokens to generate.")
     parser.add_argument("--temperature", type=float, default=1.0,   help="Sampling temperature (0 = greedy).")
     parser.add_argument("--device",     default="auto",              help='Target device: "cpu", "cuda", or "auto".')
+    parser.add_argument("--no-cache",   action="store_true",         help="Disable KV cache.")
     return parser.parse_args()
 
 
@@ -63,17 +65,28 @@ def main() -> None:
         print(f"[ERROR] Checkpoint not found: '{args.checkpoint}'")
         sys.exit(1)
 
-    # ── Rebuild vocabulary from corpus ────────────────────────────────────
-    if not os.path.exists(args.data_path):
-        print(f"[ERROR] Corpus not found at '{args.data_path}'. Run download_data.py first.")
-        sys.exit(1)
-    with open(args.data_path, encoding="utf-8") as f:
-        text = f.read()
-    tokenizer = CharTokenizer()
-    tokenizer.build_vocab(text)
-
     # ── Load config & build model skeleton ───────────────────────────────
     cfg = get_config(args.config)
+    
+    # ── Rebuild/Load vocabulary ────────────────────────────────────
+    tokenizer: BaseTokenizer
+    if cfg.tokenizer_type == "bpe":
+        tokenizer = BPETokenizer()
+        bpe_path = os.path.join(os.path.dirname(args.checkpoint), "bpe.json")
+        if os.path.exists(bpe_path):
+            tokenizer.load(bpe_path)
+        else:
+            print(f"[ERROR] BPE merges not found at '{bpe_path}'")
+            sys.exit(1)
+    else:
+        if not os.path.exists(args.data_path):
+            print(f"[ERROR] Corpus not found at '{args.data_path}'. Run download_data.py first.")
+            sys.exit(1)
+        with open(args.data_path, encoding="utf-8") as f:
+            text = f.read()
+        tokenizer = CharTokenizer()
+        tokenizer.build_vocab(text)
+
     if args.device != "auto":
         cfg.device = args.device
     device = cfg.resolved_device()
@@ -98,6 +111,7 @@ def main() -> None:
         prompt=args.prompt,
         max_new_tokens=args.max_tokens,
         temperature=args.temperature,
+        use_cache=not args.no_cache,
     )
     print(output)
     print("-" * 60)
